@@ -1,126 +1,112 @@
 import telebot
-from telebot import types
-from io import BytesIO
 import re
+from io import BytesIO
 
-# আপনার বট টোকেন এখানে দিন
+# আপনার বট টোকেন
 API_TOKEN = '8493753474:AAGifjXjyimF4GkxjfaIuGTVX9a0mkHXsS0'
 bot = telebot.TeleBot(API_TOKEN)
 
-# ডাটা স্টোর করার জন্য ডিকশনারি
+# ইউজার প্রিফিক্স স্টোর করার জন্য ডিকশনারি
 user_prefixes = {}
-user_collected_numbers = {}
 
-def get_main_markup():
-    markup = types.InlineKeyboardMarkup()
-    btn_gen = types.InlineKeyboardButton("✅ GENERATE FILE", callback_data="generate_file")
-    btn_reset = types.InlineKeyboardButton("🔄 START OVER", callback_data="reset_prefix")
-    markup.add(btn_gen, btn_reset)
-    return markup
+def filter_logic(input_text, prefixes):
+    """নাম্বার ফিল্টার করার মূল ফাংশন"""
+    # কমা, স্পেস বা নিউ লাইন অনুযায়ী ডাটা আলাদা করা
+    raw_data = re.split(r'[ ,\n\r\t]+', input_text)
+    results = []
+    
+    # প্রিফিক্স থেকে + সরিয়ে ক্লিন করা যাতে ম্যাচিং সহজ হয়
+    clean_prefixes = [p.replace('+', '').strip() for p in prefixes]
+    
+    for item in raw_data:
+        num = item.strip()
+        if not num: continue
+        
+        # নাম্বার থেকে + সরিয়ে চেক করা
+        search_num = num.replace('+', '')
+        
+        if any(search_num.startswith(pref) for pref in clean_prefixes):
+            # আউটপুটে সব সময় + ফরম্যাট বজায় রাখা
+            final_num = num if num.startswith('+') else "+" + num
+            results.append(final_num)
+            
+    # ডুপ্লিকেট রিমুভ এবং সর্ট করা
+    return sorted(list(set(results)))
 
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
+@bot.message_handler(commands=['start', 'reset'])
+def welcome_or_reset(message):
     user_id = message.from_user.id
     user_prefixes.pop(user_id, None)
-    user_collected_numbers.pop(user_id, None)
-
-    welcome_text = (
-        "<b>🎉 Welcome To BUBALULA BOT 🤖✨</b>\n\n"
-        "<b>📥 SEND THE PREFIX(ES) YOU WANT TO FILTER</b>\n"
-        "<i>(Example: 017, 018, +88017)</i>"
-    )
-    bot.reply_to(message, welcome_text, parse_mode="HTML")
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callbacks(call):
-    user_id = call.from_user.id
     
-    if call.data == "reset_prefix":
-        user_prefixes.pop(user_id, None)
-        user_collected_numbers.pop(user_id, None)
-        bot.answer_callback_query(call.id, "All Cleared!")
-        bot.send_message(call.message.chat.id, "<b>🔄 SETTINGS RESET. SEND NEW PREFIX(ES).</b>", parse_mode="HTML")
+    msg = (
+        "<b>🚀 BUBALULA AUTO-FILTER ACTIVE</b>\n\n"
+        "<b>1. প্রথমে প্রিফিক্স পাঠান</b> (যেমন: 017, 88018)\n"
+        "<b>2. এরপর নাম্বার বা .txt ফাইল পাঠান</b>\n\n"
+        "<i>প্রিফিক্স বদলাতে /reset লিখুন।</i>"
+    )
+    bot.reply_to(message, msg, parse_mode="HTML")
 
-    elif call.data == "generate_file":
-        collected = user_collected_numbers.get(user_id, [])
-        if not collected:
-            bot.answer_callback_query(call.id, "No numbers found with matching prefixes!", show_alert=True)
-            return
+@bot.message_handler(content_types=['document'])
+def handle_docs(message):
+    user_id = message.from_user.id
+    
+    if user_id not in user_prefixes:
+        bot.reply_to(message, "❌ আগে প্রিফিক্স লিখে পাঠান!")
+        return
 
-        # ডুপ্লিকেট রিমুভ এবং সর্টিং
-        processed = sorted(list(set(collected)))
-        result_data = "\n".join(processed)
+    if message.document.file_name.endswith('.txt'):
+        file_info = bot.get_file(message.document.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        try:
+            content = downloaded.decode('utf-8')
+        except UnicodeDecodeError:
+            content = downloaded.decode('latin-1')
         
-        bio = BytesIO(result_data.encode('utf-8'))
-        bio.name = "Filtered_Numbers.txt"
-
-        bot.send_document(
-            call.message.chat.id,
-            bio,
-            caption=f"<b>✅ COMPLETED!\nTOTAL UNIQUE NUMBERS: {len(processed)}</b>",
-            parse_mode="HTML",
-            reply_markup=get_main_markup()
-        )
-        # ফাইল দেওয়ার পর ডাটা ক্লিয়ার হবে যাতে নতুন করে কাজ শুরু করা যায়
-        user_collected_numbers[user_id] = []
+        process_and_send(message, content)
+    else:
+        bot.reply_to(message, "❌ দুঃখিত, শুধু .txt ফাইল সাপোর্ট করে।")
 
 @bot.message_handler(func=lambda message: True)
-def handle_all_messages(message):
-    if message.text.startswith('/'): return
-
+def handle_all_text(message):
     user_id = message.from_user.id
     text = message.text.strip()
 
-    # ধাপ ১: প্রিফিক্স সেট করা (যদি আগে থেকে সেট করা না থাকে)
+    # যদি ইউজারের প্রিফিক্স সেট না থাকে, তবে প্রথম মেসেজটিই প্রিফিক্স
     if user_id not in user_prefixes:
-        raw_prefixes = re.split(r'[ ,]+', text)
-        clean_prefixes = [p.replace('+', '').strip() for p in raw_prefixes if p.strip()]
-        
-        if clean_prefixes:
-            user_prefixes[user_id] = clean_prefixes
-            user_collected_numbers[user_id] = []
-            bot.reply_to(
-                message, 
-                f"<b>🎯 PREFIXES SET TO: {', '.join(clean_prefixes)}</b>\n\n"
-                f"<b>📥 NOW SEND YOUR NUMBER LISTS.</b>\n"
-                f"<i>You can send multiple messages for big lists.</i>",
-                parse_mode="HTML"
-            )
-            return
+        raw_p = re.split(r'[ ,]+', text)
+        user_prefixes[user_id] = [p.strip() for p in raw_p if p.strip()]
+        bot.reply_to(message, f"✅ প্রিফিক্স সেট হয়েছে: <b>{', '.join(user_prefixes[user_id])}</b>\nএখন নাম্বার বা ফাইল পাঠান।", parse_mode="HTML")
+        return
 
-    # ধাপ ২: নাম্বার কালেক্ট করা
-    target_prefixes = user_prefixes.get(user_id, [])
-    # নাম্বার সেপারেটর হিসেবে কমা, স্পেস বা নিউ লাইন হ্যান্ডেল করবে
-    lines = re.split(r'[ ,\n]+', text)
-    count_added_this_time = 0
+    # প্রিফিক্স সেট থাকলে সরাসরি ফিল্টারিং
+    process_and_send(message, text)
 
-    if user_id not in user_collected_numbers:
-        user_collected_numbers[user_id] = []
-
-    for num in lines:
-        clean_num = num.strip()
-        if not clean_num: continue
-        
-        search_num = clean_num.replace('+', '')
-        
-        # প্রিফিক্স ম্যাচ চেক
-        if any(search_num.startswith(pref) for pref in target_prefixes):
-            # ফরমেট ঠিক রাখা
-            formatted_num = clean_num if clean_num.startswith('+') else "+" + clean_num
-            user_collected_numbers[user_id].append(formatted_num)
-            count_added_this_time += 1
-
-    current_total = len(set(user_collected_numbers[user_id]))
+def process_and_send(message, data):
+    user_id = message.from_user.id
+    prefixes = user_prefixes.get(user_id, [])
     
-    bot.reply_to(
-        message,
-        f"<b>📥 Added {count_added_this_time} numbers from this message.</b>\n"
-        f"<b>📊 Total Unique Numbers in Queue: {current_total}</b>\n\n"
-        f"<i>Keep sending more or click Generate.</i>",
-        parse_mode="HTML",
-        reply_markup=get_main_markup()
+    # প্রসেসিং মেসেজ
+    wait_msg = bot.reply_to(message, "⏳ প্রসেসিং চলছে...")
+    
+    filtered_list = filter_logic(data, prefixes)
+    
+    if not filtered_list:
+        bot.edit_message_text("❌ কোনো নাম্বার ম্যাচ করেনি!", message.chat.id, wait_msg.message_id)
+        return
+
+    # আউটপুট ফাইল তৈরি
+    output = "\n".join(filtered_list)
+    bio = BytesIO(output.encode('utf-8'))
+    bio.name = f"Result_{len(filtered_list)}.txt"
+
+    bot.delete_message(message.chat.id, wait_msg.message_id)
+    bot.send_document(
+        message.chat.id, 
+        bio, 
+        caption=f"✅ <b>ফিল্টার সম্পন্ন!</b>\n📊 মোট ইউনিক নাম্বার: {len(filtered_list)}",
+        parse_mode="HTML"
     )
 
 if __name__ == "__main__":
-    print("--- BOT IS RUNNING ---")
+    print("--- BOT STARTED (NO BUTTON MODE) ---")
     bot.infinity_polling()
